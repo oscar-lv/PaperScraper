@@ -1,50 +1,143 @@
-const fetch = require('node-fetch');
 const cheerio = require('cheerio');
 
 const url = 'https://papers.ssrn.com/sol3/papers.cfm?abstract_id=702281';
 
-function scrapePaperMetadata(url) {
-  return fetch(url)
-    .then((res) => res.text())
-    .then((html) => {
-      // Load the HTML into a Cheerio object
-      const $ = cheerio.load(html);
+function getArxivID(url) {
+  const match = url.match(/arxiv\.org\/pdf\/(.+)\.pdf/);
+  if (!match) {
+    throw new Error('Invalid arXiv URL');
+  }
+  const arxivId = match[1];
+  return arxivId;
+}
 
-      // Extract the title of the paper
-      const title = $('h1').text().trim();
+function formatAuthorsList(authors, mode = 'arxiv') {
+  if (mode == 'arxiv') {
+    const formattedAuthors = authors.map((author) => {
+      const names = author.split(' ');
+      if (names.length === 1) {
+        return `[[${names[0]}]]`;
+      } else if (names.length === 2) {
+        const formattedName =
+          names[0].charAt(0).toUpperCase() +
+          names[0].slice(1) +
+          ' ' +
+          names[1].charAt(0).toUpperCase() +
+          names[1].slice(1);
+        return `[[${formattedName}]]`;
+      } else {
+        const formattedName =
+          names[0].charAt(0).toUpperCase() +
+          names[0].slice(1) +
+          ' ' +
+          names[names.length - 1].charAt(0).toUpperCase() +
+          names[names.length - 1].slice(1);
+        return `[[${formattedName}]]`;
+      }
+    });
+    return formattedAuthors.join(', ');
+  } else if (mode == 'ssrn') {
+    // In this case the list will come as ['Last, First', 'Last, First', ...], return formatted as [[First Last]], [[First Last]], ...
+    const formattedAuthors = authors.map((author) => {
+      const names = author.split(', ');
+      if (names.length === 1) {
+        return `[[${names[0]}]]`;
+      } else {
+        names[1] = names[1].split(' ')[0];
+        const formattedName =
+          names[1].charAt(0).toUpperCase() +
+          names[1].slice(1) +
+          ' ' +
+          names[0].charAt(0).toUpperCase() +
+          names[0].slice(1);
+        return `[[${formattedName}]]`;
+      }
+    });
+    return formattedAuthors.join(', ');
+  }
+}
 
-      // Extract the abstract of the paper
-      const abstract = $('.abstract-text')
-        .text()
-        .trim()
-        .replace(/^Abstract\s+/i, '');
+function generateMarkdownTemplate(authors, date, abstract, mode = 'arxiv') {
+  // Create an authorList variable, given a list of authors is a string #[[Author 1]], #[[Author 2]] etc
+  const authorList = formatAuthorsList(authors, (mode = mode));
 
-      // Extract the authors of the paper
-      const authors = $('meta[name="citation_author"]')
-        .map((i, el) => $(el).attr('content'))
-        .get();
+  const metadata = `- Metadata
+      - **Publication Date**: ${date}
+      - **Author**: ${authorList}
+      - {{[[TODO]]}} [[Papers]]/[[Reading]] [[Topics]]: 
+      - **Source**:`;
 
-      // Extract the date of the paper
-      const date = Date(
-        $('meta[name="citation_publication_date"]').attr('content')
+  const notes = `### Notes
+      - **Abstract**
+          - ${abstract}
+      - **Introduction**`;
+
+  const template = `${metadata}\n${notes}`;
+  return template;
+}
+
+async function getArxivPaperInfo(arxivID) {
+  const api_url = `https://export.arxiv.org/api/query?id_list=${arxivID}`;
+  try {
+    const response = await fetch(api_url);
+    const data = await response.text();
+    const parser = new DOMParser();
+    const xml = parser.parseFromString(data, 'text/xml');
+    const entry = xml.getElementsByTagName('entry')[0];
+    const title = entry.getElementsByTagName('title')[0].textContent;
+    const abstract = entry.getElementsByTagName('summary')[0].textContent;
+    const authorElements = entry.getElementsByTagName('author');
+    const authors = [];
+    for (let i = 0; i < authorElements.length; i++) {
+      authors.push(
+        authorElements[i].getElementsByTagName('name')[0].textContent
       );
+    }
+    const year = new Date(
+      entry.getElementsByTagName('published')[0].textContent
+    ).getFullYear();
+    const metadata = generateMarkdownTemplate(
+      authors,
+      year,
+      abstract.replace(/(\r\n|\n|\r)/gm, ''),
+      'ssrn'
+    );
+    return [title + ', ' + authors[0] + ', ' + year, metadata, abstract];
+  } catch (error) {
+    return 'An error occurred while fetching paper information.';
+  }
+}
 
-      return {
-        title,
-        abstract,
-        authors,
-        date,
-      };
-    })
-    .catch((err) => console.error(err));
+async function getSSRNPaperInfo(url) {
+  try {
+    const response = await fetch(url);
+    const html = await response.text();
+    const $ = cheerio.load(html);
+
+    const title = $('h1').text().trim();
+    // Check if #abstract exists, if not, check if .abstract-text exists
+    var abstract = $('#abstract').text().trim();
+    if (abstract == '') {
+      // get only paragraph text
+      var abstract = $('.abstract-text p').text().trim();
+    }
+    const authors = $('meta[name="citation_author"]')
+      .map((i, el) => $(el).attr('content'))
+      .get();
+    const date = $('meta[name="citation_publication_date"]').attr('content');
+    const year = new Date(date).getFullYear();
+
+    const metadata = generateMarkdownTemplate(
+      authors,
+      year,
+      abstract.replace(/(\r\n|\n|\r)/gm, ''),
+      (mode = 'ssrn')
+    );
+    return [title + ', ' + authors[0] + ', ' + year, metadata, abstract];
+  } catch (error) {
+    return 'An error occurred while fetching paper information.';
+  }
 }
 
 // Example usage
-scrapePaperMetadata(url)
-  .then((metadata) => {
-    console.log('Title:', metadata.title);
-    console.log('Abstract:', metadata.abstract);
-    console.log('Authors:', metadata.authors);
-    console.log('Date:', metadata.date);
-  })
-  .catch((err) => console.error(err));
+getSSRNPaperInfo(url).then((data) => console.log(data));
